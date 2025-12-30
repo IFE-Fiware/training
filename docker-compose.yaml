@@ -1,0 +1,154 @@
+# 
+# .env file holds the configuration - make any changes using this file
+
+services:
+  # Webserver for the @context files 
+  ngsi-ld-context:
+    labels:
+      org.fiware: 'fiware'
+    image: httpd:alpine
+    hostname: fiware-ld-context 
+    container_name: fiware-ld-context
+    ports:
+        - "80:80"
+    volumes:
+        - datamodels:/usr/local/apache2/htdocs/
+        - type: bind
+          source: ${PWD}/conf/mime.types
+          target: /usr/local/apache2/conf/mime.types
+          read_only: true
+    healthcheck:
+      test: (wget --server-response --spider --quiet  http://${CONTEXT_WEBSERVER_HOSTNAME}/user-context.jsonld 2>&1 | awk 'NR==1{print $$2}'|  grep -q -e "200") || exit 1
+    networks:
+      - fiware-net
+
+  # Orion context broker 
+  orion-ld:
+    labels:
+      org.fiware: 'fiware'
+    platform: linux/amd64
+    image: quay.io/fiware/orion-ld:${ORIONLD_VERSION}
+    hostname: fiware-orion-ld
+    container_name: fiware-orion-ld
+    depends_on:
+      - mongo-db
+    networks:
+      - fiware-net
+    ports:
+      - ${ORIONLD_PORT:-1026}:${ORIONLD_PORT:-1026}
+    command: -dbhost fiware-mongo-db -logLevel DEBUG -forwarding -mongocOnly
+    healthcheck:
+      test: curl --fail -s http://fiware-orion-ld:${ORIONLD_PORT}/version || exit 1
+      interval: 10s
+
+  node-red:
+    image: nodered/node-red
+    labels:
+      org.fiware: 'fiware'
+    hostname: node-red
+    container_name: fiware-node-red
+    ports:
+      - "1880:1880"
+    volumes:
+      - node-red-data:/data
+    restart: unless-stopped
+    networks:
+      - fiware-net 
+
+  mongo-db:
+    labels:
+      org.fiware: 'fiware'
+    image: mongo:8.2
+    hostname: fiware-mongo-db
+    container_name: fiware-mongo-db
+    restart: unless-stopped
+    ports:
+      - "27017:27017" # localhost:27017
+    volumes:
+      - mongo-db:/data/db
+      - mongo-config:/data/configdb
+    networks:
+      - fiware-net
+
+  mosquitto:
+    labels:
+      org.fiware: 'fiware'
+    image: eclipse-mosquitto:latest
+    container_name: fiware-mosquitto
+    hostname: fiware-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883" # mqtt (unencrypted)
+      - "9001:9001" # websocket (if used)
+    volumes:
+      - ./mosquitto/config:/mosquitto/config:ro
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    healthcheck:
+      test: ["CMD-SHELL","mosquitto_sub -h localhost -t healthcheck -C 1 -W 3 >/dev/null 2>&1 || true"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - fiware-net
+
+  iot-agent:
+    labels:
+      org.fiware: 'fiware'
+    image: fiware/iotagent-json:latest
+    container_name: fiware-iot-agent
+    hostname: fiware-iot-agent
+    restart: unless-stopped
+    environment:
+      - IOTA_MONGO_HOST=${IOTA_MONGO_HOST}
+      - IOTA_NORTH_PORT=4041
+      - IOTA_PROVIDER_URL=http://fiware-iot-agent:4041
+      - IOTA_LOG_LEVEL=DEBUG
+      - IOTA_CB_HOST=orion              # name of the context broker to update context
+      - IOTA_CB_PORT=1026               # port the context broker listens on to update context
+      - IOTA_REGISTRY_TYPE=fiware-mongo-db      # Whether to hold IoT device info in memory or in a database
+      - IOTA_TIMESTAMP=true             # whether to include or not the timestamp
+      - IOTA_CB_NGSI_VERSION=ld         # NGSI version to use
+      - IOTA_AUTOCAST=true              # autocasting of values into NGSI standard
+      - IOTA_MONGO_HOST=fiware-mongo-db        # The host name of MongoDB
+      - IOTA_MONGO_PORT=27017           # The port mongoDB is listening on
+      - IOTA_MONGO_DB=iotagentjson      # The name of the database used in mongoDB
+      - IOTA_HTTP_PORT=7898             # The port used for device traffic over HTTP
+      - IOTA_DEFAULT_RESOURCE=/iot/json # IOTA_PROVIDER_URL, the default path the IoT Agent uses listening for JSON measures over HTTP.
+      - IOTA_MQTT_HOST=fiware-mosquitto        # MQTT broker service
+      - IOTA_MQTT_PORT=1883             # MQTT service port
+      - IOTA_DEFAULT_TRANSPORT=mqtt     # ---
+      - IOTA_AMQP_DISABLED=true
+      - IOTA_JSON_LD_CONTEXT=http://fiware-ld-context/user-context.jsonld
+#      - IOTA_MQTT_USERNAME=myusername
+#      - IOTA_MQTT_PASSWORD=mypassword      
+    ports:
+      - "4041:4041"
+      - "7898:7898"
+    depends_on:
+      - mongo-db
+      - mosquitto
+    healthcheck:
+      test: ["CMD-SHELL","curl -fsS http://localhost:4041/ || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+    networks:
+      - fiware-net
+
+# Shared volumes
+volumes:
+  mongo-db:
+  mongo-config:
+  node-red-data:
+  datamodels:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${PWD}/datamodels"
+
+# User-defined network so services have a stable subnet and DNS
+networks:
+  fiware-net:
+    driver: bridge
